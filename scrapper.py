@@ -1,5 +1,7 @@
 import time
 import csv
+import threading
+import os
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -14,6 +16,41 @@ unique_image_urls = set()
 TARGET_COUNT = 2000
 SEARCH_TERM = "Apple Plant" # Change this to search for whatever you want!
 
+AUTO_SCROLL_ENABLED = True
+
+def input_listener():
+    global AUTO_SCROLL_ENABLED
+    while True:
+        input() # Wait for Enter
+        AUTO_SCROLL_ENABLED = not AUTO_SCROLL_ENABLED
+        status = "RESUMED" if AUTO_SCROLL_ENABLED else "PAUSED"
+        print(f"\n[!] AUTO-SCROLL {status}. (Press Enter to toggle again)")
+
+# Start background listener
+listener_thread = threading.Thread(target=input_listener, daemon=True)
+listener_thread.start()
+
+# Filename for saving
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "CSV_DATA")
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR)
+
+csv_filename = os.path.join(OUTPUT_DIR, f"pinterest_{SEARCH_TERM.replace(' ', '_').lower()}.csv")
+
+# Pre-load existing URLs to avoid duplicates across runs
+if os.path.exists(csv_filename):
+    try:
+        with open(csv_filename, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            next(reader, None)  # skip header
+            for row in reader:
+                if row:
+                    unique_image_urls.add(row[0])
+        print(f"Loaded {len(unique_image_urls)} existing URLs from {csv_filename} (skipping duplicates).")
+    except Exception as e:
+        print(f"Warning: could not read existing CSV — {e}")
+
 try:
     # 2. Login Sequence
     print("Navigating to login...")
@@ -25,8 +62,12 @@ try:
     password_input = driver.find_element(By.CSS_SELECTOR, '[data-test-id="passwordInputField"]')
     password_input.send_keys("YOUR_PASSWORD") 
 
-    login_button = driver.find_element(By.CSS_SELECTOR, '[data-test-id="registerFormSubmitButton"] button')
-    login_button.click()
+    login_button = wait.until(
+        EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, '[data-test-id="registerFormSubmitButton"] button')
+        )
+    )
+    driver.execute_script("arguments[0].click();", login_button)
 
     # Wait for the home feed to load completely
     print("Waiting for home feed to load...")
@@ -58,7 +99,7 @@ try:
         for img in images:
             try:
                 url = img.get_attribute('src')
-                if url:
+                if url and "/videos/" not in url:
                     unique_image_urls.add(url)
                 
                 if len(unique_image_urls) >= TARGET_COUNT:
@@ -72,13 +113,15 @@ try:
         if len(unique_image_urls) >= TARGET_COUNT:
             break
         
-        driver.execute_script("window.scrollBy(0, 800);")
-        time.sleep(1.5)
+        if AUTO_SCROLL_ENABLED:
+            driver.execute_script("window.scrollBy(0, 800);")
+            time.sleep(1.5)
+        else:
+            time.sleep(0.5)
 
     print("Target reached!")
 
     # 5. Save to CSV
-    csv_filename = f"pinterest_{SEARCH_TERM.replace(' ', '_').lower()}.csv"
     print(f"Saving data to {csv_filename}...")
     
     with open(csv_filename, mode='w', newline='', encoding='utf-8') as file:

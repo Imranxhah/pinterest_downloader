@@ -47,6 +47,8 @@ class PinterestScraperApp:
         self._target_count = 0
         self._driver = None
         self._selected_csv_path = tk.StringVar(value="")
+        self._auto_scroll_enabled = True
+        self._remote_window = None
 
         self._setup_styles()
         self._build_ui()
@@ -451,10 +453,21 @@ class PinterestScraperApp:
     # Logging
     # ──────────────────────────────────────────────────────────────────────────
     def _log(self, message):
+        # UI update
         self._log_text.config(state="normal")
         self._log_text.insert("end", f"› {message}\n")
         self._log_text.see("end")
         self._log_text.config(state="disabled")
+
+        # File logging
+        try:
+            log_file = os.path.join(SCRIPT_DIR, "scraper_log.txt")
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {message}\n")
+                f.flush() # Ensure it's written immediately
+        except Exception:
+            pass
 
     # ──────────────────────────────────────────────────────────────────────────
     # Start / Stop handlers
@@ -494,14 +507,27 @@ class PinterestScraperApp:
         self._log_text.delete("1.0", "end")
         self._log_text.config(state="disabled")
 
+        # Clear/Create log file for new session
+        try:
+            log_file = os.path.join(SCRIPT_DIR, "scraper_log.txt")
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write("=== NEW SCRAPING SESSION STARTED ===\n")
+        except Exception:
+            pass
+
         self._start_btn.config(state="disabled")
         self._stop_btn.config(state="normal")
+        self._auto_scroll_enabled = True
+        self._show_remote_control()
 
         # Determine CSV path
         csv_path = self._selected_csv_path.get().strip()
         if not csv_path:
+            output_dir = os.path.join(SCRIPT_DIR, "CSV_DATA")
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
             safe_name = search_term.replace(" ", "_").lower()
-            csv_path = os.path.join(SCRIPT_DIR, f"{safe_name}.csv")
+            csv_path = os.path.join(output_dir, f"{safe_name}.csv")
 
         self._scraping_thread = threading.Thread(
             target=self._run_scraper,
@@ -515,6 +541,49 @@ class PinterestScraperApp:
         self._stop_event.set()
         self._status_label.config(text="Stopping… please wait.")
         self._stop_btn.config(state="disabled")
+        self._hide_remote_control()
+
+    def _show_remote_control(self):
+        if self._remote_window:
+            return
+
+        self._remote_window = tk.Toplevel(self.root)
+        self._remote_window.title("Remote")
+        self._remote_window.geometry("200x120")
+        self._remote_window.resizable(False, False)
+        self._remote_window.configure(bg="#1a1a2e")
+        self._remote_window.attributes("-topmost", True)
+        
+        # Position at right side of screen
+        screen_width = self._remote_window.winfo_screenwidth()
+        screen_height = self._remote_window.winfo_screenheight()
+        self._remote_window.geometry(f"200x120+{screen_width-220}+100")
+
+        ttk.Label(self._remote_window, text="Scroll Control", style="Sub.TLabel").pack(pady=10)
+        
+        self._remote_pause_btn = ttk.Button(
+            self._remote_window,
+            text="⏸ Pause Scrolling",
+            style="Browse.TButton",
+            command=self._on_toggle_scroll
+        )
+        self._remote_pause_btn.pack(expand=True, fill="x", padx=20, pady=5)
+
+    def _hide_remote_control(self):
+        if self._remote_window:
+            self._remote_window.destroy()
+            self._remote_window = None
+
+    def _on_toggle_scroll(self):
+        self._auto_scroll_enabled = not self._auto_scroll_enabled
+        if self._auto_scroll_enabled:
+            if hasattr(self, "_remote_pause_btn"):
+                self._remote_pause_btn.config(text="⏸ Pause Scrolling")
+            self._log("Auto-scrolling resumed.")
+        else:
+            if hasattr(self, "_remote_pause_btn"):
+                self._remote_pause_btn.config(text="▶ Resume Scrolling")
+            self._log("Auto-scrolling paused. You can now click images manually.")
 
     # ──────────────────────────────────────────────────────────────────────────
     # Poll progress from main thread (safe tkinter update)
@@ -526,6 +595,11 @@ class PinterestScraperApp:
                 text=f"{self._collected_count} / {self._target_count}"
             )
             self._progress["value"] = pct
+            
+            if self._remote_window and hasattr(self, "_remote_progress_label"):
+                self._remote_progress_label.config(
+                    text=f"{self._collected_count} / {self._target_count}"
+                )
 
         if self._scraping_thread and self._scraping_thread.is_alive():
             self.root.after(500, self._poll_progress)
@@ -538,6 +612,7 @@ class PinterestScraperApp:
     # ──────────────────────────────────────────────────────────────────────────
     def _run_scraper(self, email, password, search_term, target, csv_path):
         unique_urls = set()
+        self.root.after(0, self._log, f"Thread started. Target: {target}, Path: {csv_path}")
 
         # ── Pre-load existing URLs if appending ──────────────────────────
         if os.path.exists(csv_path):
@@ -574,10 +649,12 @@ class PinterestScraperApp:
             )
             password_input.send_keys(password)
 
-            login_button = self._driver.find_element(
-                By.CSS_SELECTOR, '[data-test-id="registerFormSubmitButton"] button'
+            login_button = wait.until(
+                EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR, '[data-test-id="registerFormSubmitButton"] button')
+                )
             )
-            login_button.click()
+            self._driver.execute_script("arguments[0].click();", login_button)
 
             self.root.after(0, self._log, "Waiting for home feed to load…")
             self.root.after(0, lambda: self._status_label.config(text="Logged in. Waiting for feed…"))
@@ -598,7 +675,7 @@ class PinterestScraperApp:
 
             self.root.after(0, self._log, "Waiting for search results…")
             self.root.after(0, lambda: self._status_label.config(text="Search results loading…"))
-            time.sleep(5)
+            time.sleep(10)
 
             if self._stop_event.is_set():
                 raise InterruptedError("Stopped by user.")
@@ -607,36 +684,62 @@ class PinterestScraperApp:
             self.root.after(0, self._log, f"Scraping started. Target: {target} links.")
             self.root.after(0, lambda: self._status_label.config(text="Scraping…"))
 
+            empty_batch_count = 0
             while len(unique_urls) < target:
                 if self._stop_event.is_set():
+                    self.root.after(0, self._log, "Stop event detected in loop.")
                     break
 
-                images = self._driver.find_elements(
-                    By.CSS_SELECTOR, '[data-test-id="pinrep-image"] img'
-                )
-                for img in images:
-                    if self._stop_event.is_set():
-                        break
-                    try:
-                        url = img.get_attribute("src")
-                        if url:
-                            unique_urls.add(url)
-                        if len(unique_urls) >= target:
+                try:
+                    images = self._driver.find_elements(
+                        By.CSS_SELECTOR, '[data-test-id="pinrep-image"] img'
+                    )
+                except Exception as e:
+                    self.root.after(0, self._log, f"Notice: Element lookup issue (retrying): {e}")
+                    images = []
+
+                new_count_this_batch = 0
+                if images:
+                    empty_batch_count = 0
+                    for img in images:
+                        if self._stop_event.is_set():
                             break
-                    except StaleElementReferenceException:
-                        continue
+                        try:
+                            url = img.get_attribute("src")
+                            if url and "/videos/" not in url:
+                                if url not in unique_urls:
+                                    unique_urls.add(url)
+                                    new_count_this_batch += 1
+                            if len(unique_urls) >= target:
+                                break
+                        except StaleElementReferenceException:
+                            continue
+                        except Exception as e:
+                            self.root.after(0, self._log, f"Error getting attribute: {e}")
+                            continue
+                else:
+                    empty_batch_count += 1
+                    if empty_batch_count > 10:
+                        self.root.after(0, self._log, "No more images found after multiple scrolls. Stopping.")
+                        break
 
                 self._collected_count = len(unique_urls)
                 self.root.after(
                     0, self._log,
-                    f"Collected {len(unique_urls)}/{target} unique URLs…"
+                    f"Collected {len(unique_urls)}/{target} unique URLs (Added {new_count_this_batch} new)."
                 )
 
                 if len(unique_urls) >= target:
+                    self.root.after(0, self._log, "Target count reached. Exiting loop.")
                     break
 
-                self._driver.execute_script("window.scrollBy(0, 800);")
-                time.sleep(1.5)
+                if self._auto_scroll_enabled:
+                    self._driver.execute_script("window.scrollBy(0, 800);")
+                    time.sleep(1.5)
+                else:
+                    time.sleep(0.5)
+            
+            self.root.after(0, self._log, f"Loop finished with {len(unique_urls)} total URLs.")
 
         except InterruptedError:
             self.root.after(0, self._log, "Scraping stopped by user.")
@@ -644,7 +747,7 @@ class PinterestScraperApp:
             self.root.after(0, self._log, f"Error: {e}")
             self.root.after(
                 0,
-                lambda: self._status_label.config(text=f"Error: {e}"),
+                lambda e=e: self._status_label.config(text=f"Error: {e}"),
             )
         finally:
             if self._driver:
@@ -657,12 +760,11 @@ class PinterestScraperApp:
             # ── Save CSV ───────────────────────────────────────────────────
             if unique_urls:
                 try:
-                    file_exists = os.path.exists(csv_path)
-                    mode = "a" if file_exists else "w"
-                    with open(csv_path, mode=mode, newline="", encoding="utf-8") as f:
+                    # We use 'w' mode because unique_urls already contains both 
+                    # newly scraped and previously existing URLs (if any).
+                    with open(csv_path, mode="w", newline="", encoding="utf-8") as f:
                         writer = csv.writer(f)
-                        if not file_exists:
-                            writer.writerow(["Image URL"])
+                        writer.writerow(["Image URL"])
                         for url in unique_urls:
                             writer.writerow([url])
                     self.root.after(
